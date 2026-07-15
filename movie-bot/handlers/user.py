@@ -37,9 +37,11 @@ async def lookup_movie(message: Message):
     movie = await db.get_movie(number)
 
     if movie is None:
+        await db.log_request(user_id=message.from_user.id, number=number, found=False)
         await message.answer(f"❌ {number} raqamli film topilmadi.\n(No movie found for number {number}.)")
         return
 
+    await db.log_request(user_id=message.from_user.id, number=number, found=True)
     await message.answer_video(
         video=movie["file_id"],
         caption=movie["caption"] or f"🎬 {movie['number']}",
