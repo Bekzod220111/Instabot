@@ -45,4 +45,5 @@ async def lookup_movie(message: Message):
     await message.answer_video(
         video=movie["file_id"],
         caption=movie["caption"] or f"🎬 {movie['number']}",
+        parse_mode=None,
     )

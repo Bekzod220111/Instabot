@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from aiogram import Router, F, Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
@@ -71,6 +72,36 @@ async def cmd_count(message: Message):
     await message.answer(f"📦 Total movies stored: {total}")
 
 
+@router.message(Command("list"))
+async def cmd_list(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    movies = await db.get_all_movies()
+
+    if not movies:
+        await message.answer("Hali hech qanday film qo'shilmagan.")
+        return
+
+    def sort_key(row):
+        # Sort numerically when the number is a plain integer, else alphabetically
+        try:
+            return (0, int(row["number"]))
+        except ValueError:
+            return (1, row["number"])
+
+    movies_sorted = sorted(movies, key=sort_key)
+
+    lines = [f"🎬 Filmlar ro'yxati ({len(movies_sorted)} ta):\n"]
+    for row in movies_sorted:
+        caption = row["caption"] or "(caption yo'q)"
+        lines.append(f"#{row['number']} — {caption}")
+
+    text = "\n".join(lines)
+    for i in range(0, len(text), 4000):
+        await message.answer(text[i:i + 4000], parse_mode=None)
+
+
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
     if not is_admin(message.from_user.id):
@@ -107,7 +138,7 @@ async def cmd_blocked(message: Message):
     # Telegram messages have a ~4096 char limit; chunk if needed
     text = "\n".join(lines)
     for i in range(0, len(text), 4000):
-        await message.answer(text[i:i + 4000])
+        await message.answer(text[i:i + 4000], parse_mode=None)
 
 
 @router.message(Command("history"))
@@ -139,7 +170,7 @@ async def cmd_history(message: Message):
 
     text = "\n".join(lines)
     for i in range(0, len(text), 4000):
-        await message.answer(text[i:i + 4000])
+        await message.answer(text[i:i + 4000], parse_mode=None)
 
 
 @router.message(Command("recent"))
@@ -162,7 +193,7 @@ async def cmd_recent(message: Message):
 
     text = "\n".join(lines)
     for i in range(0, len(text), 4000):
-        await message.answer(text[i:i + 4000])
+        await message.answer(text[i:i + 4000], parse_mode=None)
 
 
 @router.message(Command("broadcast"))
@@ -266,17 +297,19 @@ async def process_broadcast_content(message: Message, state: FSMContext, bot: Bo
 
     status_msg = await message.answer(f"📤 Sending to {total} users...")
 
+    broadcast_id = int(time.time())
     sent = 0
     blocked = 0
     failed = 0
 
     for user_id in user_ids:
         try:
-            await bot.copy_message(
+            sent_message = await bot.copy_message(
                 chat_id=user_id,
                 from_chat_id=message.chat.id,
                 message_id=message.message_id,
             )
+            await db.log_broadcast_message(broadcast_id, user_id, sent_message.message_id)
             sent += 1
         except TelegramForbiddenError:
             # User blocked the bot or deleted their account — mark, don't delete
@@ -286,11 +319,12 @@ async def process_broadcast_content(message: Message, state: FSMContext, bot: Bo
             # Telegram is asking us to slow down — wait and retry once
             await asyncio.sleep(e.retry_after)
             try:
-                await bot.copy_message(
+                sent_message = await bot.copy_message(
                     chat_id=user_id,
                     from_chat_id=message.chat.id,
                     message_id=message.message_id,
                 )
+                await db.log_broadcast_message(broadcast_id, user_id, sent_message.message_id)
                 sent += 1
             except Exception:
                 failed += 1
@@ -304,5 +338,52 @@ async def process_broadcast_content(message: Message, state: FSMContext, bot: Bo
         f"✅ Broadcast finished.\n\n"
         f"Sent: {sent}\n"
         f"Blocked/removed: {blocked}\n"
-        f"Failed: {failed}"
+        f"Failed: {failed}\n\n"
+        f"🆔 Broadcast ID: {broadcast_id}\n"
+        f"Agar bekor qilmoqchi bo'lsangiz (48 soat ichida): /undo {broadcast_id}"
+    )
+
+
+@router.message(Command("undo"))
+async def cmd_undo(message: Message, state: FSMContext, bot: Bot):
+    if not is_admin(message.from_user.id):
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Usage: /undo <broadcast_id>")
+        return
+
+    try:
+        broadcast_id = int(args[1].strip())
+    except ValueError:
+        await message.answer("broadcast_id must be a number.")
+        return
+
+    entries = await db.get_broadcast_messages(broadcast_id)
+
+    if not entries:
+        await message.answer(f"No broadcast found with ID {broadcast_id}.")
+        return
+
+    status_msg = await message.answer(f"🗑️ Deleting {len(entries)} messages...")
+
+    deleted = 0
+    too_old_or_failed = 0
+
+    for entry in entries:
+        try:
+            await bot.delete_message(chat_id=entry["user_id"], message_id=entry["message_id"])
+            deleted += 1
+        except Exception:
+            # Message too old (>48h), already deleted, or user blocked — skip silently
+            too_old_or_failed += 1
+        await asyncio.sleep(0.05)
+
+    await db.delete_broadcast_messages_log(broadcast_id)
+
+    await status_msg.edit_text(
+        f"✅ Undo finished.\n\n"
+        f"Deleted: {deleted}\n"
+        f"Skipped (too old / already gone): {too_old_or_failed}"
     )

@@ -34,12 +34,23 @@ CREATE TABLE IF NOT EXISTS requests (
 );
 """
 
+CREATE_BROADCAST_MESSAGES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS broadcast_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    broadcast_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    sent_at TEXT DEFAULT (datetime('now', '+5 hours'))
+);
+"""
+
 
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_TABLE_SQL)
         await db.execute(CREATE_USERS_TABLE_SQL)
         await db.execute(CREATE_REQUESTS_TABLE_SQL)
+        await db.execute(CREATE_BROADCAST_MESSAGES_TABLE_SQL)
 
         # Migration for DBs created before is_blocked/blocked_at existed
         for stmt in (
@@ -92,6 +103,13 @@ async def count_movies() -> int:
         cursor = await db.execute("SELECT COUNT(*) FROM movies")
         row = await cursor.fetchone()
         return row[0] if row else 0
+
+
+async def get_all_movies() -> list[aiosqlite.Row]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT number, caption FROM movies")
+        return await cursor.fetchall()
 
 
 async def touch_user(user_id: int, username: str | None, first_name: str | None) -> None:
@@ -190,3 +208,31 @@ async def get_recent_requests(limit: int = 20) -> list[aiosqlite.Row]:
             (limit,),
         )
         return await cursor.fetchall()
+
+
+async def log_broadcast_message(broadcast_id: int, user_id: int, message_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO broadcast_messages (broadcast_id, user_id, message_id) VALUES (?, ?, ?)",
+            (broadcast_id, user_id, message_id),
+        )
+        await db.commit()
+
+
+async def get_broadcast_messages(broadcast_id: int) -> list[aiosqlite.Row]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT user_id, message_id FROM broadcast_messages WHERE broadcast_id = ?",
+            (broadcast_id,),
+        )
+        return await cursor.fetchall()
+
+
+async def delete_broadcast_messages_log(broadcast_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM broadcast_messages WHERE broadcast_id = ?",
+            (broadcast_id,),
+        )
+        await db.commit()
